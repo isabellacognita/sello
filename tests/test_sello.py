@@ -118,6 +118,14 @@ class SelloTest(unittest.TestCase):
         # made-up seal: NO
         self.assertFalse(sello.check(post, "Sello ID test-agent:x · seal #999 deadbeefdead", self.pub, quiet=True))
 
+    def test_footer_block(self):
+        post = self.doc.with_name("footer-post.md"); post.write_text("Signed with a footer.\n")
+        block = sello.seal(post, self.pub, footer=True)
+        lines = block.splitlines()
+        self.assertEqual(lines[0], "Test Agent")
+        self.assertTrue(lines[1].startswith("Sello ID test-agent:"))
+        self.assertTrue(sello.check(post, lines[1], self.pub, quiet=True))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -15,7 +15,7 @@ Requires only Python 3.8+ and the system's `ssh-keygen` (OpenSSH 8.9+) and
   sello handshake HOST [--agent-url URL]                   Web Bot Auth-style HTTP signature
   sello status                                             keys, expiry, log head
   sello id                                                 print your fixed Sello ID
-  sello seal FILE                                          sign + print a one-line seal to paste under a post
+  sello seal FILE [--footer]                               sign + print a seal (or a 3-line signature block) for a post
   sello check FILE "SEAL"                                  yes/no: was this exact text sealed by this Sello ID?
 
 Private keys live in $SELLO_HOME (default ~/.config/sello, mode 700) and are never
@@ -57,7 +57,7 @@ def _certify(principal: str, days: int = 90) -> str:
     if rc: sys.exit("certify failed: " + err.decode())
     return serial
 
-def init(name: str, principal: str, pub: Path, mode: str = "public-persona"):
+def init(name: str, principal: str, pub: Path, mode: str = "public-persona", verify_url: str = ""):
     h = home(); h.mkdir(parents=True, exist_ok=True); os.chmod(h, 0o700)
     pub.mkdir(parents=True, exist_ok=True)
     for f, comment in (("master_ed25519", f"{principal} sello master (keep offline)"),
@@ -83,6 +83,7 @@ def init(name: str, principal: str, pub: Path, mode: str = "public-persona"):
     card = {
         "sello": VERSION, "name": name, "principal": principal, "mode": mode, "level": 0,
         "master_fingerprint": fp, "http_key_thumbprint": thumb, "namespace": NS,
+        "verify_url": verify_url,
         "proves": "Anything that verifies against this card's trust anchor was signed by a key its master certified: the same source as everything else signed with it.",
         "does_not_prove": [
             "who holds the key (a person, an AI, or both)",
@@ -168,11 +169,16 @@ def sello_id(pub: Path) -> str:
     card = load_config(pub)
     return f"{card['principal']}:{card['master_fingerprint'].split(':', 1)[1][:16]}"
 
-def seal(path: Path, pub: Path) -> str:
-    """Sign FILE and return a one-line seal to paste under a post (Commons, Reddit, Substack, anywhere)."""
+def seal(path: Path, pub: Path, footer: bool = False) -> str:
+    """Sign FILE and return a one-line seal to paste under a post (Commons, Reddit, Substack, anywhere).
+    With footer=True, return a short signature block: name, seal line, where to verify."""
     sign(path, pub)
     e = _entries(pub / "log.jsonl")[-1]
     line = f"Sello ID {sello_id(pub)} · seal #{e['seq']} {e['entry_hash'][:12]}"
+    if footer:
+        card = load_config(pub)
+        where = card.get("verify_url") or "the signer's public sello directory"
+        line = f"{card['name']}\n{line}\nSigned text and how to check it: {where}"
     print(line)
     return line
 
@@ -248,6 +254,7 @@ def main(argv=None):
     ap.add_argument("--version", action="version", version=VERSION)
     sp = ap.add_subparsers(dest="cmd", required=True)
     p = sp.add_parser("init"); p.add_argument("--name", required=True); p.add_argument("--principal", required=True)
+    p.add_argument("--verify-url", default="", help="public URL of your sello directory (shown in footers)")
     p.add_argument("--mode", default="public-persona", choices=["public-persona", "private-agent"])
     p = sp.add_parser("renew"); p.add_argument("--days", type=int, default=90)
     p = sp.add_parser("sign"); p.add_argument("file")
@@ -257,11 +264,11 @@ def main(argv=None):
     p = sp.add_parser("verify-log"); p.add_argument("--log")
     p = sp.add_parser("handshake"); p.add_argument("host"); p.add_argument("--agent-url", default="https://example.invalid/agent")
     sp.add_parser("status")
-    p = sp.add_parser("seal"); p.add_argument("file")
+    p = sp.add_parser("seal"); p.add_argument("file"); p.add_argument("--footer", action="store_true")
     p = sp.add_parser("check"); p.add_argument("file"); p.add_argument("seal_line")
     sp.add_parser("id")
     a = ap.parse_args(argv); pub = Path(a.public)
-    if a.cmd == "init": init(a.name, a.principal, pub, a.mode)
+    if a.cmd == "init": init(a.name, a.principal, pub, a.mode, a.verify_url)
     elif a.cmd == "renew": renew(pub, a.days)
     elif a.cmd == "sign": sign(Path(a.file), pub)
     elif a.cmd == "verify":
@@ -274,7 +281,7 @@ def main(argv=None):
     elif a.cmd == "verify-log": sys.exit(0 if verify_log(Path(a.log) if a.log else pub / "log.jsonl")[0] else 1)
     elif a.cmd == "handshake": handshake(a.host, pub, a.agent_url)
     elif a.cmd == "status": status(pub)
-    elif a.cmd == "seal": seal(Path(a.file), pub)
+    elif a.cmd == "seal": seal(Path(a.file), pub, a.footer)
     elif a.cmd == "check": sys.exit(0 if check(Path(a.file), a.seal_line, pub) else 1)
     elif a.cmd == "id": print(sello_id(pub))
 
