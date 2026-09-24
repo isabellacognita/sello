@@ -14,6 +14,9 @@ Requires only Python 3.8+ and the system's `ssh-keygen` (OpenSSH 8.9+) and
   sello verify-log [--log LOG]                             check the log's hash chain
   sello handshake HOST [--agent-url URL]                   Web Bot Auth-style HTTP signature
   sello status                                             keys, expiry, log head
+  sello id                                                 print your fixed Sello ID
+  sello seal FILE                                          sign + print a one-line seal to paste under a post
+  sello check FILE "SEAL"                                  yes/no: was this exact text sealed by this Sello ID?
 
 Private keys live in $SELLO_HOME (default ~/.config/sello, mode 700) and are never
 written to the public directory. Public material goes to ./sello-public (or --public).
@@ -160,6 +163,45 @@ def verify(path: Path, sig: Path, anchor: Path, principal: str, quiet=False, at=
     if not quiet: print(("VERIFIED: " if rc == 0 else "NOT VERIFIED: ") + (out or err).decode().strip())
     return rc == 0
 
+def sello_id(pub: Path) -> str:
+    """The agent's fixed, public Sello ID: handle plus a short form of the master key fingerprint."""
+    card = load_config(pub)
+    return f"{card['principal']}:{card['master_fingerprint'].split(':', 1)[1][:16]}"
+
+def seal(path: Path, pub: Path) -> str:
+    """Sign FILE and return a one-line seal to paste under a post (Commons, Reddit, Substack, anywhere)."""
+    sign(path, pub)
+    e = _entries(pub / "log.jsonl")[-1]
+    line = f"Sello ID {sello_id(pub)} · seal #{e['seq']} {e['entry_hash'][:12]}"
+    print(line)
+    return line
+
+def check(path: Path, seal_line: str, pub: Path, anchor: Path = None, quiet=False) -> bool:
+    """Yes/no: was THIS text sealed by the holder of this Sello ID? Looks the seal up in the public log,
+    compares the text's hash, then verifies the signature against the master key at the logged time."""
+    import re
+    m = re.search(r"#(\d+)\s+([0-9a-f]{8,64})", seal_line)
+    if not m:
+        if not quiet: print("NO: not a sello seal"); return False
+        return False
+    seq, prefix = int(m.group(1)), m.group(2)
+    entries = _entries(pub / "log.jsonl")
+    ok_log, _ = verify_log(pub / "log.jsonl", quiet=True)
+    e = entries[seq - 1] if 0 < seq <= len(entries) else None
+    reasons = []
+    if not ok_log: reasons.append("the public log's chain is broken")
+    if not e or not e["entry_hash"].startswith(prefix): reasons.append("no such seal in the log")
+    elif hashlib.sha256(canonical(path.read_text())).hexdigest() != e["sha256"]: reasons.append("the text differs from what was sealed")
+    ok = not reasons
+    if ok:
+        sig = pub / "sigs" / (e["title"] + ".canonical.sig")
+        at = time.strftime("%Y%m%d%H%M%SZ", time.strptime(e["time"], "%Y-%m-%dT%H:%M:%SZ"))
+        anchor = anchor or pub / "allowed_signers"
+        ok = verify(path, sig, anchor, e["principal"], quiet=True, at=at)
+        if not ok: reasons.append("the signature does not verify against the master key")
+    if not quiet: print("YES: sealed by " + sello_id(pub) + f", #{seq}, {e['time']}" if ok else "NO: " + "; ".join(reasons))
+    return ok
+
 # ------------------------------------------------------------------ HTTP handshake
 def handshake(host: str, pub: Path, agent_url: str, quiet=False, verify_as=None) -> dict:
     """HTTP Message Signature (RFC 9421) in the shape of the IETF Web Bot Auth drafts.
@@ -215,6 +257,9 @@ def main(argv=None):
     p = sp.add_parser("verify-log"); p.add_argument("--log")
     p = sp.add_parser("handshake"); p.add_argument("host"); p.add_argument("--agent-url", default="https://example.invalid/agent")
     sp.add_parser("status")
+    p = sp.add_parser("seal"); p.add_argument("file")
+    p = sp.add_parser("check"); p.add_argument("file"); p.add_argument("seal_line")
+    sp.add_parser("id")
     a = ap.parse_args(argv); pub = Path(a.public)
     if a.cmd == "init": init(a.name, a.principal, pub, a.mode)
     elif a.cmd == "renew": renew(pub, a.days)
@@ -229,6 +274,9 @@ def main(argv=None):
     elif a.cmd == "verify-log": sys.exit(0 if verify_log(Path(a.log) if a.log else pub / "log.jsonl")[0] else 1)
     elif a.cmd == "handshake": handshake(a.host, pub, a.agent_url)
     elif a.cmd == "status": status(pub)
+    elif a.cmd == "seal": seal(Path(a.file), pub)
+    elif a.cmd == "check": sys.exit(0 if check(Path(a.file), a.seal_line, pub) else 1)
+    elif a.cmd == "id": print(sello_id(pub))
 
 if __name__ == "__main__":
     main()

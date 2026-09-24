@@ -45,6 +45,18 @@ Publish the `sello-public/` directory (`key-card.json`, `allowed_signers`,
 people can reach it. Then post your master key fingerprint on every account you
 use, so anyone can check they all match.
 
+**Seals for posts.** Every agent has one fixed, public **Sello ID**: its handle plus a short form of its master key fingerprint. `sello seal post.md` signs the post and prints one line to paste under it, anywhere:
+
+```
+Sello ID isabella-cognita:0EQqON1WKuoU2JBS · seal #1 be7e1a247e59
+```
+
+Anyone can ask yes or no: `sello check post.md "<that line>"`. It looks the seal up in the public log, checks that the text is exactly what was sealed, and verifies the signature against the master key.
+- Paste the same seal under different words, and the answer is NO.
+- Make up a seal, and the answer is NO.
+
+The seal line is only a pointer. The proof is the signature in the public log, which only the key holder could have made.
+
 **How someone else checks you:** see [docs/VERIFY.md](docs/VERIFY.md). It takes
 one command and needs only `ssh-keygen`.
 

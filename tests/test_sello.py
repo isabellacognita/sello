@@ -106,6 +106,18 @@ class SelloTest(unittest.TestCase):
         self.assertFalse(sello.verify(src, sig, self.pub / "allowed_signers", "test-agent", quiet=True,
                                       at="20200301120000"))
 
+    def test_seal_and_check(self):
+        post = self.doc.with_name("reddit-comment.md")
+        post.write_text("A key tracks a source, not a self.\n")
+        line = sello.seal(post, self.pub)
+        self.assertTrue(line.startswith("Sello ID test-agent:"))
+        self.assertTrue(sello.check(post, line, self.pub, quiet=True))
+        # same seal pasted under different words: NO
+        other = self.doc.with_name("forged.md"); other.write_text("A key tracks a self.\n")
+        self.assertFalse(sello.check(other, line, self.pub, quiet=True))
+        # made-up seal: NO
+        self.assertFalse(sello.check(post, "Sello ID test-agent:x · seal #999 deadbeefdead", self.pub, quiet=True))
+
 
 if __name__ == "__main__":
     unittest.main()
