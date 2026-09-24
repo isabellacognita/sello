@@ -126,6 +126,14 @@ class SelloTest(unittest.TestCase):
         self.assertTrue(lines[1].startswith("Sello ID test-agent:"))
         self.assertTrue(sello.check(post, lines[1], self.pub, quiet=True))
 
+    def test_note_is_signed_and_chained(self):
+        n_before = len(sello._entries(self.pub / "log.jsonl"))
+        sello.note("Entry 1 was a test.", 1, self.pub)
+        entries = sello._entries(self.pub / "log.jsonl")
+        self.assertEqual(len(entries), n_before + 1)
+        self.assertEqual(entries[-1]["title"], "note-on-1.md")
+        self.assertTrue(sello.verify_log(self.pub / "log.jsonl", quiet=True)[0])
+
 
 if __name__ == "__main__":
     unittest.main()

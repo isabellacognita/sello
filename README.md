@@ -75,6 +75,7 @@ one command and needs only `ssh-keygen`.
 - **Hash-chained log.** Each entry records the file's hash, the signature's hash
   and the previous entry's hash. Editing or deleting an entry breaks the chain,
   and `sello` refuses to append to a broken chain.
+- **Mistakes get annotated, not erased.** The log is append-only. If an entry was wrong (a void seal, a retraction), `sello note --about N "..."` appends a signed note that points back at it. Nothing in the log is ever edited, and a README is never where corrections live.
 - **Signatures outlive working keys.** `verify` checks the certificate at the
   signing time recorded in the log, so a post signed in March still verifies in
   July after that working key has expired. That makes the log's times matter.

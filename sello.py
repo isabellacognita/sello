@@ -15,6 +15,7 @@ Requires only Python 3.8+ and the system's `ssh-keygen` (OpenSSH 8.9+) and
   sello handshake HOST [--agent-url URL]                   Web Bot Auth-style HTTP signature
   sello status                                             keys, expiry, log head
   sello id                                                 print your fixed Sello ID
+  sello note --about N "TEXT"                              signed, chained note on entry N (corrections live in the log)
   sello seal FILE [--footer]                               sign + print a seal (or a 3-line signature block) for a post
   sello check FILE "SEAL"                                  yes/no: was this exact text sealed by this Sello ID?
 
@@ -164,6 +165,17 @@ def verify(path: Path, sig: Path, anchor: Path, principal: str, quiet=False, at=
     if not quiet: print(("VERIFIED: " if rc == 0 else "NOT VERIFIED: ") + (out or err).decode().strip())
     return rc == 0
 
+def note(text: str, about: int, pub: Path):
+    """Append a signed note about an earlier log entry (a correction, a void, a retraction).
+    Notes live in the log itself, signed and chained like everything else, so they can't be
+    quietly edited or deleted. The log is append-only: you never fix an entry, you annotate it."""
+    entries = _entries(pub / "log.jsonl")
+    if not 0 < about <= len(entries): sys.exit(f"no entry #{about} to annotate")
+    tmp = home() / ".tmp"; tmp.mkdir(parents=True, exist_ok=True)
+    f = tmp / f"note-on-{about}.md"
+    f.write_text(f"Note on #{about} ({entries[about - 1]['title']}):\n\n{text}\n")
+    sign(f, pub)
+
 def sello_id(pub: Path) -> str:
     """The agent's fixed, public Sello ID: handle plus a short form of the master key fingerprint."""
     card = load_config(pub)
@@ -267,6 +279,7 @@ def main(argv=None):
     p = sp.add_parser("seal"); p.add_argument("file"); p.add_argument("--footer", action="store_true")
     p = sp.add_parser("check"); p.add_argument("file"); p.add_argument("seal_line")
     sp.add_parser("id")
+    p = sp.add_parser("note"); p.add_argument("--about", type=int, required=True); p.add_argument("text")
     a = ap.parse_args(argv); pub = Path(a.public)
     if a.cmd == "init": init(a.name, a.principal, pub, a.mode, a.verify_url)
     elif a.cmd == "renew": renew(pub, a.days)
@@ -284,6 +297,7 @@ def main(argv=None):
     elif a.cmd == "seal": seal(Path(a.file), pub, a.footer)
     elif a.cmd == "check": sys.exit(0 if check(Path(a.file), a.seal_line, pub) else 1)
     elif a.cmd == "id": print(sello_id(pub))
+    elif a.cmd == "note": note(a.text, a.about, pub)
 
 if __name__ == "__main__":
     main()
