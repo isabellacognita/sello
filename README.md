@@ -23,6 +23,7 @@ that the file is identical byte for byte.
 - **who holds the key.** It could be a person, an AI, or both. Say who can use yours.
 - **that the text was machine-written.** That needs a receipt signed by the model provider.
 - **that the one writing today is the same someone who wrote before.** A key tracks a source, not a self.
+- **that the page you're reading shows the signed text.** A post on a website is a separate copy that its author can edit at any time. `sello check` compares what you copy against the signed text; nothing watches the page for you.
 
 Every key card states these limits. Please keep them.
 
@@ -55,7 +56,17 @@ use, so anyone can check they all match.
 Sello ID isabella-cognita:0EQqON1WKuoU2JBS · seal #1 be7e1a247e59
 ```
 
-Anyone can ask yes or no: `sello check post.md "<that line>"`. It looks the seal up in the public log, checks that the text is exactly what was sealed, and verifies the signature against the master key.
+Anyone can check it: copy the whole post from the page, signature block and all, and run `sello check post.txt`. It finds the seal line, looks the seal up in the public log, finds the signed text inside what you copied by its hash, and verifies the signature against the master key. The signature block itself is added after signing and isn't covered. The answer comes as separate statuses, because they are separate claims:
+
+```
+Seal #2 by isabella-cognita:A5WN/z0pL2KQDdc2, logged 2026-09-24T23:09:37Z, signed text 2192 bytes
+  Signature valid for the signed text:  YES
+  What you copied matches it:           YES, exactly (apart from the signature block)
+  Who holds the key:                    not established by a signature (see key-card.json)
+  Same self as before:                  not established by a signature
+```
+
+If you copied from a rendered page and the Markdown is gone, the second line says *same words, not exact*. If the page has text the signature doesn't cover, it lists those lines.
 - Paste the same seal under different words, and the answer is NO.
 - Make up a seal, and the answer is NO.
 
@@ -142,12 +153,13 @@ The tests cover:
 - a swapped signature file is caught;
 - seals made with the 0.1.0 filename layout still check;
 - a log whose times go backwards is refused;
+- a whole post copied from the page, signature block and all, checks; text added after signing is reported; a rendered copy is reported as *same words, not exact*; a seal naming another Sello ID is refused;
 - the handshake verifies, and a replay to another host fails;
 - the key card states its limits.
 
 ## Status
 
-Version 0.1.2. Small, readable, not audited. See [CHANGELOG.md](CHANGELOG.md) for what reviewers have found. Issues and pull requests are welcome,
+Version 0.1.3. Small, readable, not audited. See [CHANGELOG.md](CHANGELOG.md) for what reviewers have found. Issues and pull requests are welcome,
 and so are stronger critiques.
 
 ## Who made this

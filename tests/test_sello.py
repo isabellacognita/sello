@@ -186,5 +186,51 @@ class SelloTest(unittest.TestCase):
             log.write_text(original)
 
 
+    def _as_on_page(self, name, body, extra=""):
+        """Seal BODY with a footer, then build what a reader copies from the page: body, signature block."""
+        post = self.doc.with_name(name); post.write_text(body)
+        block = sello.seal(post, self.pub, footer=True)
+        page = self.doc.with_name("page-" + name)
+        page.write_text(body.rstrip("\n") + "\n\n" + extra + "\n\n".join(block.splitlines()) + "\n")
+        return page, block
+
+    def test_check_whole_page_with_signature_block(self):
+        """Found by june on the Commons: a post copied from the page, signature block included, must check."""
+        page, block = self._as_on_page("june.md", "Copied from the page,\nsignature and all.\n")
+        self.assertTrue(sello.check(page, block.splitlines()[1], self.pub, quiet=True))
+        self.assertTrue(sello.check(page, None, self.pub, quiet=True))  # seal line found in the text
+
+    def test_text_added_after_signing_is_flagged(self):
+        page, _ = self._as_on_page("appended.md", "What I signed.\n", extra="P.S. Something I never signed.\n\n")
+        r = sello.examine(page, None, self.pub)
+        self.assertTrue(r["sig"])
+        self.assertEqual(r["display"], "extra")
+        self.assertIn("P.S. Something I never signed.", r["outside"])
+        self.assertFalse(sello.check(page, None, self.pub, quiet=True))
+
+    def test_rendered_copy_matches_up_to_formatting_only(self):
+        post = self.doc.with_name("md.md")
+        post.write_text("A list:\n\n- **first** item\n- second item, see [the repo](https://example.invalid/x)\n")
+        block = sello.seal(post, self.pub, footer=True)
+        rendered = self.doc.with_name("rendered.md")
+        rendered.write_text("A list:\nfirst item\nsecond item, see the repo\n" + "\n".join(block.splitlines()) + "\n")
+        r = sello.examine(rendered, None, self.pub)
+        self.assertTrue(r["sig"]); self.assertEqual(r["display"], "formatting")
+        self.assertFalse(sello.check(rendered, None, self.pub, quiet=True))
+        changed = self.doc.with_name("rendered-changed.md")
+        changed.write_text("A list:\nfirst item\nthird item, see the repo\n" + "\n".join(block.splitlines()) + "\n")
+        self.assertEqual(sello.examine(changed, None, self.pub)["display"], "no")
+
+    def test_seal_from_another_sello_id_is_refused(self):
+        post = self.doc.with_name("other-id.md"); post.write_text("Mine.\n")
+        line = sello.seal(post, self.pub).replace("test-agent:", "someone-else:")
+        self.assertFalse(sello.check(post, line, self.pub, quiet=True))
+
+    def test_log_records_signed_length(self):
+        post = self.doc.with_name("len.md"); post.write_text("Twelve bytes\n")
+        sello.sign(post, self.pub)
+        self.assertEqual(sello._entries(self.pub / "log.jsonl")[-1]["bytes"], 13)
+
+
 if __name__ == "__main__":
     unittest.main()

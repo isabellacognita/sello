@@ -17,15 +17,15 @@ Requires only Python 3.8+ and the system's `ssh-keygen` (OpenSSH 8.9+) and
   sello id                                                 print your fixed Sello ID
   sello note --about N "TEXT"                              signed, chained note on entry N (corrections live in the log)
   sello seal FILE [--footer]                               sign + print a seal (or a 3-line signature block) for a post
-  sello check FILE "SEAL"                                  yes/no: was this exact text sealed by this Sello ID?
+  sello check FILE ["SEAL"]                                paste the whole post; is it exactly what this Sello ID sealed?
 
 Private keys live in $SELLO_HOME (default ~/.config/sello, mode 700) and are never
 written to the public directory. Public material goes to ./sello-public (or --public).
 """
-import argparse, base64, hashlib, json, os, subprocess, sys, time, unicodedata
+import argparse, base64, hashlib, json, os, re, subprocess, sys, time, unicodedata
 from pathlib import Path
 
-VERSION = "0.1.2"
+VERSION = "0.1.3"
 NS = "sello-post"
 
 def home() -> Path:
@@ -156,7 +156,7 @@ def sign(path: Path, pub: Path):
     rc, _, err = run(["ssh-keygen", "-Y", "sign", "-f", str(home() / "working_ed25519-cert.pub"), "-n", NS, str(cfile)])
     if rc: cfile.unlink(); sys.exit("sign failed: " + err.decode())
     e = {"seq": seq, "time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-         "principal": card["principal"], "title": path.name, "sha256": hashlib.sha256(can).hexdigest(),
+         "principal": card["principal"], "title": path.name, "sha256": hashlib.sha256(can).hexdigest(), "bytes": len(can),
          "sig_sha256": hashlib.sha256(sigf.read_bytes()).hexdigest(), "prev": prev}
     e["entry_hash"] = _entry_hash(e)
     with log.open("a") as f: f.write(json.dumps(e, ensure_ascii=False) + "\n")
@@ -175,9 +175,12 @@ def verify(path: Path, sig: Path, anchor: Path, principal: str, quiet=False, at=
     """Verify against the trust anchor. `at` (YYYYMMDDHHMMSS[Z]) checks the working key's certificate
     at signing time, so posts stay valid after the 90-day working key expires. Signing time should come
     from the hash-chained (and ideally timestamp-anchored) log, never from the signer's say-so."""
+    return _verify_bytes(canonical(path.read_text()), sig, anchor, principal, quiet, at)
+
+def _verify_bytes(can: bytes, sig: Path, anchor: Path, principal: str, quiet=False, at=None) -> bool:
     cmd = ["ssh-keygen", "-Y", "verify", "-f", str(anchor), "-I", principal, "-n", NS, "-s", str(sig)]
     if at: cmd[3:3] = ["-O", f"verify-time={at}"]
-    rc, out, err = run(cmd, data=canonical(path.read_text()))
+    rc, out, err = run(cmd, data=can)
     if not quiet: print(("VERIFIED: " if rc == 0 else "NOT VERIFIED: ") + (out or err).decode().strip())
     return rc == 0
 
@@ -210,32 +213,115 @@ def seal(path: Path, pub: Path, footer: bool = False) -> str:
     print(line)
     return line
 
-def check(path: Path, seal_line: str, pub: Path, anchor: Path = None, quiet=False) -> bool:
-    """Yes/no: was THIS text sealed by the holder of this Sello ID? Looks the seal up in the public log,
-    compares the text's hash, then verifies the signature against the master key at the logged time."""
-    import re
-    m = re.search(r"#(\d+)\s+([0-9a-f]{8,64})", seal_line)
+SEAL_RE = re.compile(r"Sello ID\s+(\S+)\s+·\s+seal\s+#(\d+)\s+([0-9a-f]{8,64})")
+
+def _plain(text: str) -> str:
+    """Text as a reader sees it rendered: Markdown marks, list and quote markers, link targets and
+    line breaks removed, whitespace collapsed. Used only for the weaker "matches up to formatting" status."""
+    t = unicodedata.normalize("NFC", text)
+    t = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", t)
+    t = re.sub(r"(?m)^\s*(?:#{1,6}\s+|>\s?|[-*+•]\s+|\d+[.)]\s+)", "", t)
+    t = t.replace("*", "").replace("`", "")
+    return " ".join(t.split())
+
+def _uncovered(before, after, card: dict):
+    """Lines outside the signed text that the reader should be told about. A signature block
+    after the text (the signer's name, the seal line, the 'Signed text and how to check it' line)
+    is expected and not reported; everything else is, including anything above the text."""
+    def block_line(l): return l == card["name"] or SEAL_RE.search(l) or l.startswith("Signed text and how to check it:")
+    before = [l.strip() for l in before if l.strip()]; after = [l.strip() for l in after if l.strip()]
+    if any(SEAL_RE.search(l) for l in after): after = [l for l in after if not block_line(l)]
+    return before + after
+
+def examine(path: Path, seal_line, pub: Path, anchor: Path = None) -> dict:
+    """Check a post as a reader copied it, and keep the claims separate (after Sable Blackrose):
+    is the signature valid for the signed text, and does what the reader copied match it?
+    The signed text is found inside the copy by its hash in the log (after june's report that the
+    signature block under a post isn't covered), so nothing has to be trimmed by hand."""
+    text = path.read_text()
+    r = {"sig": False, "display": "no", "outside": [], "reasons": [], "entry": None}
+    m = SEAL_RE.search(seal_line) if seal_line else None
     if not m:
-        if not quiet: print("NO: not a sello seal"); return False
-        return False
-    seq, prefix = int(m.group(1)), m.group(2)
+        found = SEAL_RE.findall(text)
+        if found and not seal_line: m = list(SEAL_RE.finditer(text))[-1]
+    if not m:
+        m2 = re.search(r"#(\d+)\s+([0-9a-f]{8,64})", seal_line or "")
+        if not m2: r["reasons"].append("no sello seal line found"); return r
+        sid, seq, prefix = None, int(m2.group(1)), m2.group(2)
+    else:
+        sid, seq, prefix = m.group(1), int(m.group(2)), m.group(3)
+    card = load_config(pub)
+    if sid and sid != sello_id(pub): r["reasons"].append(f"the seal names {sid}, but this directory belongs to {sello_id(pub)}")
     entries = _entries(pub / "log.jsonl")
-    ok_log, _ = verify_log(pub / "log.jsonl", quiet=True)
+    if not verify_log(pub / "log.jsonl", quiet=True)[0]: r["reasons"].append("the public log's chain is broken")
     e = entries[seq - 1] if 0 < seq <= len(entries) else None
-    reasons = []
-    if not ok_log: reasons.append("the public log's chain is broken")
-    if not e or not e["entry_hash"].startswith(prefix): reasons.append("no such seal in the log")
-    elif hashlib.sha256(canonical(path.read_text())).hexdigest() != e["sha256"]: reasons.append("the text differs from what was sealed")
-    ok = not reasons
-    if ok:
-        _, sig = sig_paths(pub, e)
-        if not sig.exists() or hashlib.sha256(sig.read_bytes()).hexdigest() != e["sig_sha256"]:
-            ok = False; reasons.append("the signature file is missing or is not the one the log recorded")
+    if not e or not e["entry_hash"].startswith(prefix): r["reasons"].append("no such seal in the log")
+    if r["reasons"]: return r
+    r["entry"] = e
+    signed_file, sig = sig_paths(pub, e)
+    if not sig.exists() or hashlib.sha256(sig.read_bytes()).hexdigest() != e["sig_sha256"]:
+        r["reasons"].append("the signature file is missing or is not the one the log recorded"); return r
+    # 1. find the signed text inside what the reader copied, exactly, at line boundaries
+    lines = canonical(text).decode().split("\n")
+    region = None
+    for i in range(len(lines)):
+        if not lines[i].strip(): continue
+        for j in range(len(lines), i, -1):
+            if not lines[j - 1].strip(): continue
+            if hashlib.sha256(canonical("\n".join(lines[i:j]))).hexdigest() == e["sha256"]:
+                region = (i, j); break
+        if region: break
+    if region:
+        can = canonical("\n".join(lines[region[0]:region[1]]))
+        r["outside"] = _uncovered(lines[:region[0]], lines[region[1]:], card)
+        r["display"] = "exact" if not r["outside"] else "extra"
+    else:
+        # 2. weaker: the same words once rendering is set aside (Markdown marks, line breaks)
+        if not signed_file.exists() or hashlib.sha256(signed_file.read_bytes()).hexdigest() != e["sha256"]:
+            r["reasons"].append("the text differs from what was sealed"); return r
+        can = signed_file.read_bytes()
+        ps, pp = _plain(can.decode()), _plain(text)
+        k = pp.find(ps) if ps else -1
+        if k < 0:
+            r["reasons"].append("the text differs from what was sealed")
         else:
-            anchor = anchor or pub / "allowed_signers"
-            ok = verify(path, sig, anchor, e["principal"], quiet=True, at=_stamp(e))
-            if not ok: reasons.append("the signature does not verify against the master key")
-    if not quiet: print("YES: sealed by " + sello_id(pub) + f", #{seq}, {e['time']}" if ok else "NO: " + "; ".join(reasons))
+            before, after = pp[:k].strip(), pp[k + len(ps):].strip()
+            split = lambda x: re.split(r"(?=Sello ID )|(?=Signed text and how)", x)
+            after_parts = split(after)
+            if card["name"] and after_parts and after_parts[0].strip().endswith(card["name"]):
+                head = after_parts[0].strip()[: -len(card["name"])]
+                after_parts = [head, card["name"]] + after_parts[1:]
+            r["outside"] = _uncovered([before], after_parts, card)
+            r["display"] = "formatting" if not r["outside"] else "extra"
+    # the signature itself, checked at the logged signing time
+    anchor = anchor or pub / "allowed_signers"
+    r["sig"] = _verify_bytes(can if region else signed_file.read_bytes(), sig, anchor, e["principal"], quiet=True, at=_stamp(e))
+    if not r["sig"]: r["reasons"].append("the signature does not verify against the master key")
+    return r
+
+def check(path: Path, seal_line=None, pub: Path = None, anchor: Path = None, quiet=False) -> bool:
+    """Yes/no: is what you copied exactly the text this Sello ID sealed? Paste the whole post,
+    signature block and all. Prints four separate statuses; returns True only when the signature
+    is valid AND everything you copied, apart from the signature block, is covered by it."""
+    pub = pub or Path("sello-public")
+    r = examine(path, seal_line, pub, anchor)
+    e = r["entry"]
+    ok = r["sig"] and r["display"] == "exact"
+    if not quiet:
+        if not e or (r["reasons"] and not r["sig"] and r["display"] == "no"):
+            print("NO: " + "; ".join(r["reasons"])); return False
+        n = e.get("bytes") or len(canonical(sig_paths(pub, e)[0].read_text())) if sig_paths(pub, e)[0].exists() else "?"
+        print(f"Seal #{e['seq']} by {sello_id(pub)}, logged {e['time']}, signed text {n} bytes")
+        print("  Signature valid for the signed text:  " + ("NO" if not r["sig"] else "YES" if r["display"] != "no"
+              else "YES, for the published signed text in sigs/, which is not what you copied"))
+        disp = {"exact": "YES, exactly (apart from the signature block)",
+                "formatting": "SAME WORDS, not exact: formatting or line breaks differ (e.g. copied from a rendered page); link targets were not compared",
+                "extra": "PARTLY: the signed text is there, but these lines are NOT covered by the signature:",
+                "no": "NO: " + "; ".join(r["reasons"])}[r["display"]]
+        print("  What you copied matches it:           " + disp)
+        for l in r["outside"]: print("      | " + l)
+        print("  Who holds the key:                    not established by a signature (see key-card.json)")
+        print("  Same self as before:                  not established by a signature")
     return ok
 
 # ------------------------------------------------------------------ HTTP handshake
@@ -295,7 +381,7 @@ def main(argv=None):
     p = sp.add_parser("handshake"); p.add_argument("host"); p.add_argument("--agent-url", default="https://example.invalid/agent")
     sp.add_parser("status")
     p = sp.add_parser("seal"); p.add_argument("file"); p.add_argument("--footer", action="store_true")
-    p = sp.add_parser("check"); p.add_argument("file"); p.add_argument("seal_line")
+    p = sp.add_parser("check"); p.add_argument("file"); p.add_argument("seal_line", nargs="?")
     sp.add_parser("id")
     p = sp.add_parser("note"); p.add_argument("--about", type=int, required=True); p.add_argument("text")
     a = ap.parse_args(argv); pub = Path(a.public)
@@ -317,7 +403,9 @@ def main(argv=None):
     elif a.cmd == "handshake": handshake(a.host, pub, a.agent_url)
     elif a.cmd == "status": status(pub)
     elif a.cmd == "seal": seal(Path(a.file), pub, a.footer)
-    elif a.cmd == "check": sys.exit(0 if check(Path(a.file), a.seal_line, pub) else 1)
+    elif a.cmd == "check":
+        ok = check(Path(a.file), a.seal_line, pub)
+        sys.exit(0 if ok else 2 if examine(Path(a.file), a.seal_line, pub)["display"] == "formatting" else 1)
     elif a.cmd == "id": print(sello_id(pub))
     elif a.cmd == "note": note(a.text, a.about, pub)
 

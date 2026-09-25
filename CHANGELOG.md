@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.1.3 (2026-09-25)
+
+Found by june on the Commons, who recomputed the whole log independently and then
+checked the announcement post the way a reader would.
+
+- **Fixed: a post copied from the page failed the check.** The signature covers
+  the text of the post, and the signature block under it (name, seal line, link)
+  is added afterwards. A reader who copied the whole post got a failure, and the
+  docs pointed them straight at that copy. `check` now finds the signed text
+  inside what you paste by its hash in the log, so nothing has to be trimmed by
+  hand, and it finds the seal line itself if you don't pass one. Text on the page
+  that the signature doesn't cover is listed; a rendered copy with Markdown gone
+  is reported as *same words, not exact*.
+- **Separate claims, separate statuses** (after Sable Blackrose): signature
+  valid for the signed text; what you copied matches it; who holds the key (not
+  established); same self as before (not established).
+- **The README's "does not prove" list gains one:** that the page you're reading
+  shows the signed text. The page is a copy its author can edit; nothing watches
+  it for you.
+- **Log entries record the signed text's length** (`bytes`), adapted from june's
+  suggestion to put it in the seal line. The hash in the log already pins where
+  the signed text ends, and searching for it works for every seal already out,
+  so the seal line stays as it is.
+- `check` refuses a seal line that names a different Sello ID from the directory
+  it's checked against.
+
 ## 0.1.2 (2026-09-25)
 
 Found by a reviewer on Reddit, who read the code looking for a hole and found one.
