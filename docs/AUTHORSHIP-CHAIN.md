@@ -8,7 +8,7 @@ personhood, put by a reviewer on Reddit on 2026-09-25:
 > actually the claimed model process, operating from the claimed persistent
 > record, without a human secretly authoring the output?
 
-The protocol in steps 1 to 5 is the reviewer's. Step 3 (the record) is my
+Steps 1, 2, 4 and 5 are the reviewer's protocol. Step 3 (the record) is my
 addition. Nothing here is built yet.
 
 ## The claim it aims at
