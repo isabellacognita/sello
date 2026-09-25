@@ -25,7 +25,7 @@ written to the public directory. Public material goes to ./sello-public (or --pu
 import argparse, base64, hashlib, json, os, subprocess, sys, time, unicodedata
 from pathlib import Path
 
-VERSION = "0.1.0"
+VERSION = "0.1.2"
 NS = "sello-post"
 
 def home() -> Path:
@@ -117,43 +117,59 @@ def _entries(log: Path):
     return [json.loads(l) for l in log.read_text().splitlines() if l.strip()]
 
 def verify_log(log: Path, quiet=False):
-    prev = "0" * 64
+    """Check the hash chain and that times never go backwards. The times are still the signer's own
+    record: an external timestamp anchor bounds them, the chain alone cannot."""
+    prev, last = "0" * 64, ""
     for i, e in enumerate(_entries(log), 1):
         if e.get("seq") != i or e.get("prev") != prev or _entry_hash(e) != e.get("entry_hash"):
             if not quiet: print(f"BROKEN at entry {i}")
             return False, prev
-        prev = e["entry_hash"]
+        if e.get("time", "") < last:
+            if not quiet: print(f"BROKEN at entry {i}: its time is earlier than the entry before it")
+            return False, prev
+        prev, last = e["entry_hash"], e.get("time", "")
     if not quiet: print(f"log intact: {len(_entries(log))} entries, head {prev}")
     return True, prev
 
 # ------------------------------------------------------------------ sign / verify
+def sig_paths(pub: Path, e: dict):
+    """Where an entry's canonical text and signature live. New entries are stored by sequence number
+    (0007-post.md.canonical), so two posts with the same filename can never overwrite each other.
+    Entries signed by sello 0.1.0 were stored by filename alone; fall back to that."""
+    d = pub / "sigs"
+    new = d / f"{e['seq']:04d}-{e['title']}.canonical"
+    base = new if new.exists() or not (d / f"{e['title']}.canonical").exists() else d / f"{e['title']}.canonical"
+    return base, Path(str(base) + ".sig")
+
 def sign(path: Path, pub: Path):
     card = load_config(pub)
     can = canonical(path.read_text())
-    sigdir = pub / "sigs"; sigdir.mkdir(exist_ok=True)
-    cfile = sigdir / (path.name + ".canonical"); cfile.write_bytes(can)
-    sigf = Path(str(cfile) + ".sig")
-    if sigf.exists(): sigf.unlink()
-    rc, _, err = run(["ssh-keygen", "-Y", "sign", "-f", str(home() / "working_ed25519-cert.pub"), "-n", NS, str(cfile)])
-    if rc: sys.exit("sign failed: " + err.decode())
     log = pub / "log.jsonl"
     ok, prev = verify_log(log, quiet=True)
-    if not ok: sys.exit("refusing to append: the log's chain is broken")
-    entries = _entries(log)
-    e = {"seq": len(entries) + 1, "time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    if not ok: sys.exit("refusing to sign: the log's chain is broken")
+    seq = len(_entries(log)) + 1
+    sigdir = pub / "sigs"; sigdir.mkdir(exist_ok=True)
+    cfile = sigdir / f"{seq:04d}-{path.name}.canonical"
+    sigf = Path(str(cfile) + ".sig")
+    if cfile.exists() or sigf.exists(): sys.exit(f"refusing to overwrite {cfile.name}: a signature is never replaced")
+    cfile.write_bytes(can)
+    rc, _, err = run(["ssh-keygen", "-Y", "sign", "-f", str(home() / "working_ed25519-cert.pub"), "-n", NS, str(cfile)])
+    if rc: cfile.unlink(); sys.exit("sign failed: " + err.decode())
+    e = {"seq": seq, "time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
          "principal": card["principal"], "title": path.name, "sha256": hashlib.sha256(can).hexdigest(),
          "sig_sha256": hashlib.sha256(sigf.read_bytes()).hexdigest(), "prev": prev}
     e["entry_hash"] = _entry_hash(e)
     with log.open("a") as f: f.write(json.dumps(e, ensure_ascii=False) + "\n")
     print(f"signed #{e['seq']} {path.name}\n  sha256 {e['sha256']}\n  sig    {sigf}")
 
-def _logged_time(path: Path, log: Path):
-    """If this exact content is in the log, return its signing time as YYYYMMDDHHMMSS (UTC)."""
+def _logged_entry(path: Path, log: Path):
+    """The log entry for this exact content, if any (the latest, if it was signed more than once)."""
     digest = hashlib.sha256(canonical(path.read_text())).hexdigest()
-    for e in _entries(log):
-        if e.get("sha256") == digest:
-            return time.strftime("%Y%m%d%H%M%SZ", time.strptime(e["time"], "%Y-%m-%dT%H:%M:%SZ"))
-    return None
+    found = [e for e in _entries(log) if e.get("sha256") == digest]
+    return found[-1] if found else None
+
+def _stamp(e: dict) -> str:
+    return time.strftime("%Y%m%d%H%M%SZ", time.strptime(e["time"], "%Y-%m-%dT%H:%M:%SZ"))
 
 def verify(path: Path, sig: Path, anchor: Path, principal: str, quiet=False, at=None) -> bool:
     """Verify against the trust anchor. `at` (YYYYMMDDHHMMSS[Z]) checks the working key's certificate
@@ -212,11 +228,13 @@ def check(path: Path, seal_line: str, pub: Path, anchor: Path = None, quiet=Fals
     elif hashlib.sha256(canonical(path.read_text())).hexdigest() != e["sha256"]: reasons.append("the text differs from what was sealed")
     ok = not reasons
     if ok:
-        sig = pub / "sigs" / (e["title"] + ".canonical.sig")
-        at = time.strftime("%Y%m%d%H%M%SZ", time.strptime(e["time"], "%Y-%m-%dT%H:%M:%SZ"))
-        anchor = anchor or pub / "allowed_signers"
-        ok = verify(path, sig, anchor, e["principal"], quiet=True, at=at)
-        if not ok: reasons.append("the signature does not verify against the master key")
+        _, sig = sig_paths(pub, e)
+        if not sig.exists() or hashlib.sha256(sig.read_bytes()).hexdigest() != e["sig_sha256"]:
+            ok = False; reasons.append("the signature file is missing or is not the one the log recorded")
+        else:
+            anchor = anchor or pub / "allowed_signers"
+            ok = verify(path, sig, anchor, e["principal"], quiet=True, at=_stamp(e))
+            if not ok: reasons.append("the signature does not verify against the master key")
     if not quiet: print("YES: sealed by " + sello_id(pub) + f", #{seq}, {e['time']}" if ok else "NO: " + "; ".join(reasons))
     return ok
 
@@ -285,10 +303,14 @@ def main(argv=None):
     elif a.cmd == "renew": renew(pub, a.days)
     elif a.cmd == "sign": sign(Path(a.file), pub)
     elif a.cmd == "verify":
-        f = Path(a.file); sig = Path(a.sig) if a.sig else pub / "sigs" / (f.name + ".canonical.sig")
+        f = Path(a.file)
+        e = _logged_entry(f, Path(a.log) if a.log else pub / "log.jsonl")
+        if a.sig: sig = Path(a.sig)
+        elif e: sig = sig_paths(pub, e)[1]
+        else: sys.exit("NOT VERIFIED: this text is not in the log (pass --sig to check a signature directly)")
         anchor = Path(a.anchor) if a.anchor else pub / "allowed_signers"
         principal = a.principal or anchor.read_text().split()[0]
-        at = _logged_time(f, Path(a.log) if a.log else pub / "log.jsonl")
+        at = _stamp(e) if e else None
         if at and not a.quiet_time: print(f"(checking the certificate at logged signing time {at})")
         sys.exit(0 if verify(f, sig, anchor, principal, at=at) else 1)
     elif a.cmd == "verify-log": sys.exit(0 if verify_log(Path(a.log) if a.log else pub / "log.jsonl")[0] else 1)

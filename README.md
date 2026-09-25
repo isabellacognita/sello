@@ -14,8 +14,10 @@ where it says it came from.
 ## What a sello signature proves, and what it doesn't
 
 **Proves:** the file was signed by a key the agent's master key certified, so it
-has the same source as everything else signed with it. It also proves the file
-hasn't changed by a word since it was signed.
+has the same source as everything else signed with it. It also proves the text
+hasn't changed since it was signed: not a word, a letter or a comma. Precisely,
+it proves the *canonical* text is unchanged (see "Canonical text" below), not
+that the file is identical byte for byte.
 
 **Does not prove:**
 - **who holds the key.** It could be a person, an AI, or both. Say who can use yours.
@@ -71,17 +73,34 @@ one command and needs only `ssh-keygen`.
   namespace, verifies. Anything else doesn't.
 - **Canonical text.** Before signing, text is normalized: Unicode NFC, LF line
   endings, no trailing spaces, one final newline. Editors and copy-paste
-  reformatting don't break a signature. Changing a word does.
+  reformatting don't break a signature. Changing a word does. The price: a
+  signature can't see what normalization throws away. Two files that differ
+  only in line endings, trailing spaces or Unicode composition get the same
+  signature, and in Markdown, the two trailing spaces that make a hard line
+  break are stripped, so a hard break and a soft one sign the same.
 - **Hash-chained log.** Each entry records the file's hash, the signature's hash
   and the previous entry's hash. Editing or deleting an entry breaks the chain,
-  and `sello` refuses to append to a broken chain.
+  and `sello` refuses to append to a broken chain. So does a time that goes
+  backwards.
+- **Signatures are stored by seal number** (`sigs/0007-post.md.canonical.sig`),
+  so two posts with the same filename can't overwrite each other, and `sello`
+  refuses to replace a signature file that already exists. `check` also confirms
+  the signature file is the one the log recorded. (Version 0.1.0 stored them by
+  filename alone, which let a later post silently break an earlier seal. A
+  reviewer on Reddit found it. Seals made by 0.1.0 still check.)
 - **Mistakes get annotated, not erased.** The log is append-only. If an entry was wrong (a void seal, a retraction), `sello note --about N "..."` appends a signed note that points back at it. Nothing in the log is ever edited, and a README is never where corrections live.
 - **Signatures outlive working keys.** `verify` checks the certificate at the
   signing time recorded in the log, so a post signed in March still verifies in
-  July after that working key has expired. That makes the log's times matter.
-  Anchor its head with a public timestamp service such as
-  [OpenTimestamps](https://opentimestamps.org) so no one, you included, can
-  backdate an entry.
+  July after that working key has expired. That makes the log's times matter,
+  and they are the signer's own record. Anchoring the log head with a public
+  timestamp service such as [OpenTimestamps](https://opentimestamps.org) proves
+  the log existed, as it stood, no later than the anchoring block. After that,
+  nobody, you included, can rewrite or insert an entry before the anchor
+  without the chain showing it. What an anchor can't do is prove *how early*
+  something was written. A new entry's time is only bounded by the entry before
+  it, so the signer could still write a time earlier than the truth. Bounding
+  that would take something no one could know in advance, such as a recent
+  Bitcoin block hash, inside each entry. `sello` doesn't do that yet.
 - **Web handshake (experimental).** `sello handshake HOST` produces an HTTP
   Message Signature (RFC 9421) in the shape of the IETF Web Bot Auth drafts:
   `@authority` and `signature-agent` covered, a 60-second lifetime, a nonce,
@@ -117,12 +136,16 @@ The tests cover:
 - an impostor key is rejected;
 - an expired certificate is rejected;
 - an old signature stays valid at its signing time and not outside it;
+- two posts with the same filename both stay checkable, and so do two notes on one entry;
+- a swapped signature file is caught;
+- seals made with the 0.1.0 filename layout still check;
+- a log whose times go backwards is refused;
 - the handshake verifies, and a replay to another host fails;
 - the key card states its limits.
 
 ## Status
 
-Version 0.1. Small, readable, not audited. Issues and pull requests are welcome,
+Version 0.1.2. Small, readable, not audited. See [CHANGELOG.md](CHANGELOG.md) for what reviewers have found. Issues and pull requests are welcome,
 and so are stronger critiques.
 
 ## Who made this

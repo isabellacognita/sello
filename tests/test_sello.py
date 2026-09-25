@@ -22,8 +22,11 @@ class SelloTest(unittest.TestCase):
     def tearDownClass(cls):
         cls.tmp.cleanup()
 
+    def _sig(self, seq=1):
+        return sello.sig_paths(self.pub, sello._entries(self.pub / "log.jsonl")[seq - 1])[1]
+
     def _verify(self, path, sig=None):
-        sig = sig or self.pub / "sigs" / (Path(path).name + ".canonical.sig")
+        sig = sig or self._sig()
         return sello.verify(Path(path), sig, self.pub / "allowed_signers", "test-agent", quiet=True)
 
     def test_signed_file_verifies(self):
@@ -32,13 +35,12 @@ class SelloTest(unittest.TestCase):
     def test_reformatting_still_verifies(self):
         copy = self.doc.with_name("post-copy.md")
         copy.write_text("One plant, and its reflection.   \r\n\r\n")
-        sig = self.pub / "sigs" / "post.md.canonical.sig"
-        self.assertTrue(self._verify(copy, sig))
+        self.assertTrue(self._verify(copy, self._sig()))
 
     def test_changed_word_fails(self):
         copy = self.doc.with_name("post-edit.md")
         copy.write_text("Two plants, and their reflection.\n")
-        self.assertFalse(self._verify(copy, self.pub / "sigs" / "post.md.canonical.sig"))
+        self.assertFalse(self._verify(copy, self._sig()))
 
     def test_private_keys_never_public(self):
         names = {p.name for p in self.pub.rglob("*")}
@@ -133,6 +135,55 @@ class SelloTest(unittest.TestCase):
         self.assertEqual(len(entries), n_before + 1)
         self.assertEqual(entries[-1]["title"], "note-on-1.md")
         self.assertTrue(sello.verify_log(self.pub / "log.jsonl", quiet=True)[0])
+
+
+    def test_same_filename_never_overwrites(self):
+        """Found by a reviewer on Reddit: two different posts both named post.md must both stay checkable."""
+        a = Path(self.tmp.name) / "a"; b = Path(self.tmp.name) / "b"; a.mkdir(); b.mkdir()
+        (a / "same.md").write_text("The first post.\n"); (b / "same.md").write_text("The second post.\n")
+        first = sello.seal(a / "same.md", self.pub)
+        second = sello.seal(b / "same.md", self.pub)
+        self.assertTrue(sello.check(a / "same.md", first, self.pub, quiet=True))
+        self.assertTrue(sello.check(b / "same.md", second, self.pub, quiet=True))
+
+    def test_two_notes_on_one_entry(self):
+        sello.note("First note.", 1, self.pub); first = sello._entries(self.pub / "log.jsonl")[-1]
+        sello.note("Second note.", 1, self.pub); second = sello._entries(self.pub / "log.jsonl")[-1]
+        for e in (first, second):
+            _, sig = sello.sig_paths(self.pub, e)
+            self.assertEqual(sello.hashlib.sha256(sig.read_bytes()).hexdigest(), e["sig_sha256"])
+
+    def test_replaced_signature_file_is_caught(self):
+        post = self.doc.with_name("swap.md"); post.write_text("Swap test.\n")
+        line = sello.seal(post, self.pub)
+        _, sig = sello.sig_paths(self.pub, sello._entries(self.pub / "log.jsonl")[-1])
+        good = sig.read_bytes(); sig.write_bytes(self._sig().read_bytes())
+        try:
+            self.assertFalse(sello.check(post, line, self.pub, quiet=True))
+        finally:
+            sig.write_bytes(good)
+        self.assertTrue(sello.check(post, line, self.pub, quiet=True))
+
+    def test_legacy_filename_layout_still_checks(self):
+        """Signatures made by 0.1.0 (stored as sigs/<title>.canonical.sig) keep verifying."""
+        post = self.doc.with_name("legacy.md"); post.write_text("Signed by an older sello.\n")
+        line = sello.seal(post, self.pub)
+        e = sello._entries(self.pub / "log.jsonl")[-1]
+        c, sig = sello.sig_paths(self.pub, e)
+        c.rename(self.pub / "sigs" / "legacy.md.canonical"); sig.rename(self.pub / "sigs" / "legacy.md.canonical.sig")
+        self.assertTrue(sello.check(post, line, self.pub, quiet=True))
+
+    def test_backwards_time_breaks_log(self):
+        later = self.doc.with_name("later.md"); later.write_text("Signed after the first post.\n")
+        sello.sign(later, self.pub)
+        log = self.pub / "log.jsonl"; original = log.read_text()
+        lines = original.splitlines(); e = json.loads(lines[-1])
+        e["time"] = "2020-01-01T00:00:00Z"; e["entry_hash"] = sello._entry_hash(e)
+        log.write_text("\n".join(lines[:-1] + [json.dumps(e)]) + "\n")
+        try:
+            self.assertFalse(sello.verify_log(log, quiet=True)[0])
+        finally:
+            log.write_text(original)
 
 
 if __name__ == "__main__":
