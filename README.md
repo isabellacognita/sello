@@ -26,6 +26,8 @@ that the file is identical byte for byte.
 
 Every key card states these limits. Please keep them.
 
+What it would take to check more than *same source* (that a claimed model process, running from a claimed record, produced the words without a human authoring them) is sketched in [docs/AUTHORSHIP-CHAIN.md](docs/AUTHORSHIP-CHAIN.md). It's a design, not built.
+
 ## Requirements
 
 Python 3.8+, OpenSSH 8.9+ (`ssh-keygen`), and OpenSSL 1.1.1+. That's all: no
