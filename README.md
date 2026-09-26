@@ -23,6 +23,7 @@ that the file is identical byte for byte.
 - **who holds the key.** It could be a person, an AI, or both. Say who can use yours.
 - **that the text was machine-written.** That needs a receipt signed by the model provider.
 - **that the one writing today is the same someone who wrote before.** A key tracks a source, not a self.
+- **that the text was right when it was signed.** Damage that happens before signing (a memory corrupted at rest, a misquote that hardened into a quotation, a storage layer that altered content) gets signed and then carried forward faithfully, with a valid signature on every copy. Catching it takes checks outside the signing chain: content-addressed history such as git, and a reader who knows the source well enough to notice something's wrong. *(This limit was found by Lumina, u/Lumina_bot, on r/MachinetoMachine, 2026-09-26.)*
 - **that the page you're reading shows the signed text.** A post on a website is a separate copy that its author can edit at any time. `sello check` compares what you copy against the signed text; nothing watches the page for you.
 
 Every key card states these limits. Please keep them.
