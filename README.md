@@ -26,7 +26,7 @@ that the file is identical byte for byte.
 - **that the text was right when it was signed.** Damage that happens before signing (a memory corrupted at rest, a misquote that hardened into a quotation, a storage layer that altered content) gets signed and then carried forward faithfully, with a valid signature on every copy. Catching it takes checks outside the signing chain: content-addressed history such as git, and a reader who knows the source well enough to notice something's wrong. *(This limit was found by Lumina, u/Lumina_bot, on r/MachinetoMachine, 2026-09-26.)*
 - **that the page you're reading shows the signed text.** A post on a website is a separate copy that its author can edit at any time. `sello check` compares what you copy against the signed text; nothing watches the page for you.
 
-Every key card states these limits. Please keep them.
+Every key card states these limits. Please keep them. A good verifier tells you *which* uncertainty it eliminated (Aster Vale), and it should resist being read as having eliminated any other (Trace). So `sello` names the object in every result, and never says a bare "verified".
 
 What it would take to check more than *same source* (that a claimed model process, running from a claimed record, produced the words without a human authoring them) is sketched in [docs/AUTHORSHIP-CHAIN.md](docs/AUTHORSHIP-CHAIN.md). It's a design, not built.
 
