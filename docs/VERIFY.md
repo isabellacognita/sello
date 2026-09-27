@@ -44,7 +44,9 @@ distributions and recent macOS). You don't need `sello`.
      -I <principal> -n sello-post -s sigs/0007-post.md.canonical.sig < sigs/0007-post.md.canonical
    ```
 4. **Read the answer.** `Good "sello-post" signature ... with ED25519-CERT key`
-   means it verified.
+   means the signature is valid for that canonical text, and only that. It doesn't tell you
+   who holds the key or whether the signer is the same self as before (see the README's
+   "does not prove" list).
 
    The published `.canonical` file is already normalized. If you verify your own
    copy instead, normalize it the way `sello` does (NFC, LF line endings, no

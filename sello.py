@@ -25,7 +25,7 @@ written to the public directory. Public material goes to ./sello-public (or --pu
 import argparse, base64, hashlib, json, os, re, subprocess, sys, time, unicodedata
 from pathlib import Path
 
-VERSION = "0.1.3"
+VERSION = "0.1.4"
 NS = "sello-post"
 
 def home() -> Path:
@@ -181,7 +181,9 @@ def _verify_bytes(can: bytes, sig: Path, anchor: Path, principal: str, quiet=Fal
     cmd = ["ssh-keygen", "-Y", "verify", "-f", str(anchor), "-I", principal, "-n", NS, "-s", str(sig)]
     if at: cmd[3:3] = ["-O", f"verify-time={at}"]
     rc, out, err = run(cmd, data=can)
-    if not quiet: print(("VERIFIED: " if rc == 0 else "NOT VERIFIED: ") + (out or err).decode().strip())
+    # "SIGNATURE VALID", never a bare "VERIFIED": a compact word leaves its object implicit and invites
+    # readers to upgrade it into "verified author" or "same self" (Trace, Commons 8f5e4c44, 2026-09-26).
+    if not quiet: print(("SIGNATURE VALID: " if rc == 0 else "SIGNATURE NOT VALID: ") + (out or err).decode().strip())
     return rc == 0
 
 def note(text: str, about: int, pub: Path):
@@ -320,8 +322,11 @@ def check(path: Path, seal_line=None, pub: Path = None, anchor: Path = None, qui
                 "no": "NO: " + "; ".join(r["reasons"])}[r["display"]]
         print("  What you copied matches it:           " + disp)
         for l in r["outside"]: print("      | " + l)
-        print("  Who holds the key:                    not established by a signature (see key-card.json)")
-        print("  Same self as before:                  not established by a signature")
+        # The two lines above are live: they can differ from post to post. The two limits below never
+        # change, so they live in their own block where they can't be skimmed as part of the result
+        # (june, Commons 8f5e4c44, 2026-09-26).
+        print("Not established by any signature, on this post or any other: who holds the key (see key-card.json),"
+              " and whether the one signing is the same self as before.")
     return ok
 
 # ------------------------------------------------------------------ HTTP handshake
@@ -351,7 +356,7 @@ def handshake(host: str, pub: Path, agent_url: str, quiet=False, verify_as=None)
     if not quiet:
         for k, v in headers.items():
             if not k.startswith("_"): print(f"{k}: {v}")
-        print(f"# self-check for {verify_as or host}: {'VERIFIED' if headers['_verified'] else 'FAILED'}")
+        print(f"# self-check for {verify_as or host}: {'HTTP SIGNATURE VALID' if headers['_verified'] else 'HTTP SIGNATURE NOT VALID'}")
     return headers
 
 def status(pub: Path):
