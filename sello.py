@@ -8,8 +8,9 @@ Requires only Python 3.8+ and the system's `ssh-keygen` (OpenSSH 8.9+) and
 `openssl` (1.1.1+). No third-party packages, no network, no accounts.
 
   sello init --name "Your Name" --principal your-handle   create keys, card, trust anchor
-  sello renew                                              certify a fresh 90-day working key
+  sello renew                                              certify a fresh 90-day working key, log the rotation
   sello sign FILE                                          sign, append to the public log
+  sello log [--kind seal|note|status]                      list the log; check its status records
   sello verify FILE [--sig SIG] [--anchor ALLOWED_SIGNERS] verify a signed file
   sello verify-log [--log LOG]                             check the log's hash chain
   sello handshake HOST [--agent-url URL]                   Web Bot Auth-style HTTP signature
@@ -22,11 +23,12 @@ Requires only Python 3.8+ and the system's `ssh-keygen` (OpenSSH 8.9+) and
 Private keys live in $SELLO_HOME (default ~/.config/sello, mode 700) and are never
 written to the public directory. Public material goes to ./sello-public (or --public).
 """
-import argparse, base64, hashlib, json, os, re, subprocess, sys, time, unicodedata
+import argparse, base64, hashlib, json, os, re, subprocess, sys, tempfile, time, unicodedata
 from pathlib import Path
 
-VERSION = "0.1.4"
+VERSION = "0.1.5"
 NS = "sello-post"
+NS_STATUS = "sello-status"  # status records: signed by the master key itself, never valid as a post
 
 def home() -> Path:
     return Path(os.environ.get("SELLO_HOME", os.path.expanduser("~/.config/sello")))
@@ -96,9 +98,62 @@ def init(name: str, principal: str, pub: Path, mode: str = "public-persona", ver
     print(f"sello init: {name} ({principal})\n  master   {fp}\n  working  certified 90 days (serial {serial})\n"
           f"  http key {thumb}\n  public   {pub}/\n  private  {h}/  (back up master_ed25519 offline; it certifies everything)")
 
+class _Wire:
+    """Reader for the SSH wire format (RFC 4251): uint32, uint64, length-prefixed strings."""
+    def __init__(self, b: bytes): self.b, self.i = b, 0
+    def _n(self, k): v = int.from_bytes(self.b[self.i:self.i + k], "big"); self.i += k; return v
+    def u32(self): return self._n(4)
+    def u64(self): return self._n(8)
+    def string(self): n = self.u32(); s = self.b[self.i:self.i + n]; self.i += n; return s
+
+def _sshstr(b: bytes) -> bytes:
+    return len(b).to_bytes(4, "big") + b
+
+def _iso(t: int) -> str:
+    return "forever" if t >= 2 ** 63 else time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
+
+def _key_info(blob: bytes) -> dict:
+    """Read an Ed25519 public key or certificate blob. For a certificate: the serial, key ID and
+    validity it carries (Unix seconds in the blob, so no time zone can blur them) and the
+    fingerprint of the key it certifies, which is the one `ssh-keygen -l` prints."""
+    w = _Wire(blob); kt = w.string().decode()
+    if kt not in ("ssh-ed25519", "ssh-ed25519-cert-v01@openssh.com"): return {"type": kt}
+    if kt != "ssh-ed25519": w.string()  # the certificate's nonce
+    pk = w.string()
+    fp = "SHA256:" + base64.b64encode(hashlib.sha256(_sshstr(b"ssh-ed25519") + _sshstr(pk)).digest()).decode().rstrip("=")
+    if kt == "ssh-ed25519": return {"type": kt, "fingerprint": fp}
+    serial = w.u64(); w.u32(); key_id = w.string().decode(); w.string()  # cert type, principals
+    after, before = w.u64(), w.u64()
+    return {"type": kt, "fingerprint": fp, "serial": serial, "key_id": key_id,
+            "valid_from": _iso(after), "valid_to": _iso(before)}
+
+def _cert_file_info(path: Path):
+    """The working certificate on disk, read from its own blob; None if there isn't one."""
+    if not path.exists(): return None
+    i = _key_info(base64.b64decode(path.read_text().split()[1]))
+    return {k: i[k] for k in ("fingerprint", "serial", "key_id", "valid_from", "valid_to") if k in i}
+
+def _sig_key(sig: Path) -> dict:
+    """The key or certificate an SSHSIG signature file names as its signer (PROTOCOL.sshsig). This
+    reads what the file says; only `ssh-keygen -Y verify` establishes that it's true."""
+    if not sig.exists(): return {}
+    blob = base64.b64decode("".join(l for l in sig.read_text().splitlines() if l and not l.startswith("-----")))
+    if blob[:6] != b"SSHSIG": return {}
+    w = _Wire(blob[6:]); w.u32()  # version
+    return _key_info(w.string())
+
+def _describe(k) -> str:
+    if not k: return "none on file"
+    return f'{k["fingerprint"]} (certificate serial {k["serial"]}, key ID "{k["key_id"]}", valid {k["valid_from"]} to {k["valid_to"]})'
+
 def renew(pub: Path, days: int = 90):
+    """Replace the working key, then log the rotation as a status record signed by the master key.
+    Seals made before the record stay valid; a seal logged after it but signed with the retired key
+    fails `check`, even while that key's certificate hasn't expired. A broken log doesn't stop the
+    rotation (replacing a key mustn't wait on the log), but sello says so and exits non-zero."""
     card = load_config(pub)
     h = home()
+    old = _cert_file_info(h / "working_ed25519-cert.pub")
     for f in ("working_ed25519", "working_ed25519.pub", "working_ed25519-cert.pub"):
         p = h / f
         if p.exists(): p.rename(h / (f + f".retired-{int(time.time())}"))
@@ -106,6 +161,102 @@ def renew(pub: Path, days: int = 90):
                       "-f", str(h / "working_ed25519")])
     if rc: sys.exit(err.decode())
     print(f"renewed: new working key, serial {_certify(card['principal'], days)}")
+    new = _cert_file_info(h / "working_ed25519-cert.pub")
+    body = (f"Retired working key: {_describe(old)}\nNew working key: {_describe(new)}\n\n"
+            "Seals logged before this record stay valid: each is checked against its own certificate at the time "
+            "the log gives for it. A seal logged after this record and signed with the retired key does not count.")
+    if not _append_status(pub, "key-rotated", body, {"old_key": old, "new_key": new}):
+        sys.exit("ROTATED BUT NOT LOGGED: the new working key is in place, but the rotation record could not be "
+                 "appended (see above). Until it is, the log can't show that the old key was retired.")
+
+# ------------------------------------------------------------------ status records
+SELF_ATTESTED = ("this agent's own master key (self-attested). No witness key exists yet, so this record "
+                 "is the agent's word about its own key.")
+
+def _append_status(pub: Path, status: str, body: str, fields: dict) -> bool:
+    """Append a status record: a claim about the key or the record, not about a text. It is signed
+    by the master key in the sello-status namespace, so it can never verify as a post, and it's
+    chained like every other entry. See docs/STATUS-RECORDS.md."""
+    card = load_config(pub); log = pub / "log.jsonl"
+    ok, prev = verify_log(log, quiet=True)
+    if not ok: print("refusing to log: the log's chain is broken", file=sys.stderr); return False
+    seq = len(_entries(log)) + 1
+    t = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    can = canonical(f"sello status record: {status}\n\nPrincipal: {card['principal']}\nTime: {t}\n"
+                    f"Attested by: {SELF_ATTESTED}\n\n{body}\n")
+    sigdir = pub / "sigs"; sigdir.mkdir(exist_ok=True)
+    title = f"status-{status}.txt"
+    cfile = sigdir / f"{seq:04d}-{title}.canonical"
+    sigf = Path(str(cfile) + ".sig")
+    if cfile.exists() or sigf.exists():
+        print(f"refusing to overwrite {cfile.name}: a signature is never replaced", file=sys.stderr); return False
+    cfile.write_bytes(can)
+    rc, _, err = run(["ssh-keygen", "-Y", "sign", "-f", str(home() / "master_ed25519"), "-n", NS_STATUS, str(cfile)])
+    if rc: cfile.unlink(); print("status signing failed: " + err.decode(), file=sys.stderr); return False
+    e = {"seq": seq, "time": t, "principal": card["principal"], "kind": "status", "status": status,
+         "attestation": "self", "title": title, "sha256": hashlib.sha256(can).hexdigest(), "bytes": len(can),
+         "sig_sha256": hashlib.sha256(sigf.read_bytes()).hexdigest(), **fields, "prev": prev}
+    e["entry_hash"] = _entry_hash(e)
+    with log.open("a") as f: f.write(json.dumps(e, ensure_ascii=False) + "\n")
+    print(f"logged #{seq} status {status} (self-attested, signed by the master key)")
+    return True
+
+def _kind(e: dict) -> str:
+    """seal, note or status. Entries from before 0.1.5 carry no kind; notes are known by their title."""
+    return e.get("kind") or ("note" if e.get("title", "").startswith("note-on-") else "seal")
+
+def verify_status(e: dict, pub: Path) -> bool:
+    """Check a status record. The trust anchor names the master key only as a cert-authority for
+    posts, so this uses an anchor line derived from it: same principal, same key, status namespace."""
+    can, sig = sig_paths(pub, e)
+    if not (can.exists() and sig.exists()): return False
+    if hashlib.sha256(sig.read_bytes()).hexdigest() != e.get("sig_sha256"): return False
+    if hashlib.sha256(can.read_bytes()).hexdigest() != e.get("sha256"): return False
+    parts = (pub / "allowed_signers").read_text().split()
+    i = next((j for j, p in enumerate(parts) if p.startswith("ssh-")), None)
+    if i is None or i + 1 >= len(parts): return False
+    with tempfile.TemporaryDirectory() as d:
+        anchor = Path(d) / "status_signers"
+        anchor.write_text(f'{parts[0]} namespaces="{NS_STATUS}" {parts[i]} {parts[i + 1]}\n')
+        rc, _, _ = run(["ssh-keygen", "-Y", "verify", "-f", str(anchor), "-I", e.get("principal", ""),
+                        "-n", NS_STATUS, "-s", str(sig)], data=can.read_bytes())
+    return rc == 0
+
+def _retirements(entries, pub: Path) -> dict:
+    """Working keys the log retired, by fingerprint, mapped to the record that retired them. Keyed by
+    the key itself, not the certificate serial (sello's serials are Unix seconds, and two can match).
+    Only rotation records whose master-key signature checks count."""
+    out = {}
+    for e in entries:
+        o = e.get("old_key") or {}
+        if _kind(e) == "status" and e.get("status") == "key-rotated" and "fingerprint" in o and verify_status(e, pub):
+            out.setdefault(o["fingerprint"], e["seq"])
+    return out
+
+def show_log(pub: Path, kind=None) -> bool:
+    """One line per entry. Status records are checked against the master key; seals and notes show the
+    working key their signature file names (`check` is what verifies a seal). Returns False if the
+    chain is broken, a status record doesn't check, or a seal names a key retired before it."""
+    log = pub / "log.jsonl"; ok, head = verify_log(log, quiet=True)
+    entries = _entries(log); retired = _retirements(entries, pub); good = ok
+    for e in entries:
+        k = _kind(e)
+        if kind and k != kind: continue
+        if k == "status":
+            v = verify_status(e, pub); good = good and v
+            what = f"{e.get('status')}, {e.get('attestation', '?')}-attested, status signature {'VALID' if v else 'NOT VALID'}"
+            if e.get("status") == "key-rotated":
+                o, n = e.get("old_key") or {}, e.get("new_key") or {}
+                what += f"\n        retired serial {o.get('serial', '-')} {o.get('fingerprint', '(none on file)')}" \
+                        f"\n        new     serial {n.get('serial', '-')} {n.get('fingerprint', '?')}"
+        else:
+            s = _sig_key(sig_paths(pub, e)[1])
+            what = f"{e['title']}  (working key {s.get('fingerprint', '?')}, serial {s.get('serial', '?')})"
+            if s.get("fingerprint") in retired and retired[s["fingerprint"]] < e["seq"]:
+                what += f"  RETIRED KEY: retired at #{retired[s['fingerprint']]}, before this entry"; good = False
+        print(f"#{e['seq']:<4} {e['time']}  {k:<6} {what}")
+    print(f"log {'intact' if ok else 'BROKEN'}: {len(entries)} entries, head {head}")
+    return good
 
 # ------------------------------------------------------------------ log
 def _entry_hash(e: dict) -> str:
@@ -258,6 +409,8 @@ def examine(path: Path, seal_line, pub: Path, anchor: Path = None) -> dict:
     if not verify_log(pub / "log.jsonl", quiet=True)[0]: r["reasons"].append("the public log's chain is broken")
     e = entries[seq - 1] if 0 < seq <= len(entries) else None
     if not e or not e["entry_hash"].startswith(prefix): r["reasons"].append("no such seal in the log")
+    elif _kind(e) == "status":
+        r["reasons"].append(f"#{seq} is a status record ({e.get('status')}), not a sealed post; `sello log` shows it")
     if r["reasons"]: return r
     r["entry"] = e
     signed_file, sig = sig_paths(pub, e)
@@ -299,6 +452,12 @@ def examine(path: Path, seal_line, pub: Path, anchor: Path = None) -> dict:
     anchor = anchor or pub / "allowed_signers"
     r["sig"] = _verify_bytes(can if region else signed_file.read_bytes(), sig, anchor, e["principal"], quiet=True, at=_stamp(e))
     if not r["sig"]: r["reasons"].append("the signature does not verify against the master key")
+    # a valid signature from a working key the log had already retired doesn't count (rotation, 0.1.5)
+    fp = _sig_key(sig).get("fingerprint")
+    retired = _retirements(entries, pub)
+    if r["sig"] and fp in retired and retired[fp] < e["seq"]:
+        r["sig"] = False
+        r["reasons"].append(f"signed with working key {fp}, which the log retired at #{retired[fp]}, before this seal")
     return r
 
 def check(path: Path, seal_line=None, pub: Path = None, anchor: Path = None, quiet=False) -> bool:
@@ -314,8 +473,8 @@ def check(path: Path, seal_line=None, pub: Path = None, anchor: Path = None, qui
             print("NO: " + "; ".join(r["reasons"])); return False
         n = e.get("bytes") or len(canonical(sig_paths(pub, e)[0].read_text())) if sig_paths(pub, e)[0].exists() else "?"
         print(f"Seal #{e['seq']} by {sello_id(pub)}, logged {e['time']}, signed text {n} bytes")
-        print("  Signature valid for the signed text:  " + ("NO" if not r["sig"] else "YES" if r["display"] != "no"
-              else "YES, for the published signed text in sigs/, which is not what you copied"))
+        print("  Signature valid for the signed text:  " + ("NO: " + "; ".join(r["reasons"]) if not r["sig"]
+              else "YES" if r["display"] != "no" else "YES, for the published signed text in sigs/, which is not what you copied"))
         disp = {"exact": "YES, exactly (apart from the signature block)",
                 "formatting": "SAME WORDS, not exact: formatting or line breaks differ (e.g. copied from a rendered page); link targets were not compared",
                 "extra": "PARTLY: the signed text is there, but these lines are NOT covered by the signature:",
@@ -361,12 +520,14 @@ def handshake(host: str, pub: Path, agent_url: str, quiet=False, verify_as=None)
 
 def status(pub: Path):
     card = load_config(pub)
-    rc, out, _ = run(["ssh-keygen", "-Lf", str(home() / "working_ed25519-cert.pub")])
-    valid = [l.strip() for l in out.decode().splitlines() if "Valid:" in l]
+    w = _cert_file_info(home() / "working_ed25519-cert.pub")
     ok, head = verify_log(pub / "log.jsonl", quiet=True)
+    entries = _entries(pub / "log.jsonl")
+    rot = [e for e in entries if _kind(e) == "status" and e.get("status") == "key-rotated"]
     print(f"{card['name']} ({card['principal']})  master {card['master_fingerprint']}")
-    print(f"working key {valid[0] if valid else '(no certificate)'}")
-    print(f"log {'intact' if ok else 'BROKEN'}: {len(_entries(pub / 'log.jsonl'))} entries, head {head}")
+    print(f"working key {'serial %s, valid %s to %s (UTC)' % (w['serial'], w['valid_from'], w['valid_to']) if w else '(no certificate)'}")
+    print(f"last rotation logged: #{rot[-1]['seq']} at {rot[-1]['time']}" if rot else "rotation: none logged yet")
+    print(f"log {'intact' if ok else 'BROKEN'}: {len(entries)} entries, head {head}")
 
 # ------------------------------------------------------------------ cli
 def main(argv=None):
@@ -379,6 +540,7 @@ def main(argv=None):
     p.add_argument("--mode", default="public-persona", choices=["public-persona", "private-agent"])
     p = sp.add_parser("renew"); p.add_argument("--days", type=int, default=90)
     p = sp.add_parser("sign"); p.add_argument("file")
+    p = sp.add_parser("log"); p.add_argument("--kind", choices=["seal", "note", "status"])
     p = sp.add_parser("verify"); p.add_argument("file"); p.add_argument("--sig"); p.add_argument("--anchor")
     p.add_argument("--principal"); p.add_argument("--log", help="log to read the signing time from")
     p.add_argument("--quiet-time", action="store_true", help=argparse.SUPPRESS)
@@ -393,9 +555,15 @@ def main(argv=None):
     if a.cmd == "init": init(a.name, a.principal, pub, a.mode, a.verify_url)
     elif a.cmd == "renew": renew(pub, a.days)
     elif a.cmd == "sign": sign(Path(a.file), pub)
+    elif a.cmd == "log": sys.exit(0 if show_log(pub, a.kind) else 1)
     elif a.cmd == "verify":
         f = Path(a.file)
         e = _logged_entry(f, Path(a.log) if a.log else pub / "log.jsonl")
+        if e and not a.sig and _kind(e) == "status":
+            v = verify_status(e, pub)
+            print(f"STATUS SIGNATURE {'VALID' if v else 'NOT VALID'}: #{e['seq']} {e.get('status')}, "
+                  f"master key, namespace {NS_STATUS}, {e.get('attestation', '?')}-attested")
+            sys.exit(0 if v else 1)
         if a.sig: sig = Path(a.sig)
         elif e: sig = sig_paths(pub, e)[1]
         else: sys.exit("NOT VERIFIED: this text is not in the log (pass --sig to check a signature directly)")

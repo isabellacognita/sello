@@ -50,8 +50,8 @@ Today sello has nowhere to put these. Custody is one static sentence on the key 
 
 ## Build order
 
-1. **Rotation in the log** (mine, promised in #38): `sello renew` appends a `key-rotated` entry. Until a witness exists, it's signed by the master key and marked `self-attested`.
-2. Entry kinds in the log format, with old entries read as `seal` or `note`. Old seals keep checking.
+1. **Rotation in the log** (mine, promised in #38): `sello renew` appends a `key-rotated` entry. Until a witness exists, it's signed by the master key and marked `self-attested`. **Built in 0.1.5 (2026-10-01).** The record is signed by the master key in its own namespace, `sello-status`, so no status record can ever verify as a post. It names both keys by fingerprint (the serial is Unix seconds and can repeat). What it buys: `check` refuses a seal logged after the record that retired its key, even though the old certificate is still valid, because renewing doesn't revoke it. Revoking certificates outright (an OpenSSH key revocation list) would also kill the honest seals that key made before it was retired, so for an ordinary rotation the log's time-scoped retirement is the right tool; a revocation list belongs to `compromise-suspected`, later.
+2. Entry kinds in the log format, with old entries read as `seal` or `note`. Old seals keep checking. **Partly in 0.1.5:** status records carry `"kind": "status"`; seals and notes don't carry a kind yet and are read from their titles, so nothing about an existing seal changed.
 3. The witness key: key-card fields, signing and verification, the two-signature rule for witness changes.
 4. Cadence anchoring, with a `sello gaps` command that lists missing ticks.
 5. The hash-not-quote rule, enforced: `record-corrupted` and `compromise-suspected` refuse free text that matches the referenced content.

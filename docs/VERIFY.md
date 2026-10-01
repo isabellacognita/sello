@@ -52,6 +52,37 @@ distributions and recent macOS). You don't need `sello`.
    copy instead, normalize it the way `sello` does (NFC, LF line endings, no
    trailing spaces, one final newline) and remove the signature block first.
 
+## Status records: key rotation (from sello 0.1.5)
+
+Some log entries aren't posts. An entry with `"kind": "status"` is a claim about
+the key itself; the first kind is `key-rotated`, written when the signer
+replaces their working key. It names the retired key and the new one, and its
+text is published in `sigs/` like a post's (`sigs/0063-status-key-rotated.txt.canonical`).
+
+It's signed by the **master key directly**, in the namespace `sello-status`, not
+by a working key. Their `allowed_signers` trusts the master only as a
+certificate authority for posts, so make a second anchor line from it: the same
+principal and the same key, with the status namespace and without
+`cert-authority`.
+
+```sh
+printf '%s namespaces="sello-status" %s %s\n' <principal> ssh-ed25519 <the key from allowed_signers> > status_signers
+ssh-keygen -Y verify -f status_signers -I <principal> -n sello-status \
+  -s sigs/0063-status-key-rotated.txt.canonical.sig < sigs/0063-status-key-rotated.txt.canonical
+```
+
+`"attestation": "self"` means what it says: the signer is vouching for their own
+key. There's no independent witness yet.
+
+**Why it matters for posts.** Replacing a working key doesn't revoke its
+certificate; that stays valid until it expires. Someone holding a stolen old
+key can still make signatures that `ssh-keygen -Y verify` accepts. The rotation
+record is what tells you not to count them: **a seal logged after the record
+that retired its key doesn't count, even though its signature is valid.**
+`sello check` applies this rule for you, and `sello log` flags any such seal.
+By hand, the signing certificate is embedded in each `.sig` file (see OpenSSH's
+`PROTOCOL.sshsig`); compare its key fingerprint with the record's `old_key`.
+
 **What you've learned:** the signed text came from whoever controls that master
 key and hasn't changed (up to the normalization above). Whether the *page* still
 shows that text is a separate question: the page is a copy the author can edit

@@ -42,8 +42,9 @@ OpenSSH 9.2 and OpenSSL 3.0.
 python3 sello.py init --name "Your Name" --principal your-handle
 python3 sello.py sign post.md          # signs and appends to sello-public/log.jsonl
 python3 sello.py verify post.md        # checks it against your trust anchor
-python3 sello.py status                # key expiry, log head
-python3 sello.py renew                 # new 90-day working key (old signatures stay valid)
+python3 sello.py status                # key expiry, last rotation, log head
+python3 sello.py renew                 # new 90-day working key, logged (old signatures stay valid)
+python3 sello.py log                   # every entry, with its kind; status records checked
 ```
 
 Publish the `sello-public/` directory (`key-card.json`, `allowed_signers`,
@@ -63,8 +64,7 @@ Anyone can check it: copy the whole post from the page, signature block and all,
 Seal #2 by isabella-cognita:A5WN/z0pL2KQDdc2, logged 2026-09-24T23:09:37Z, signed text 2192 bytes
   Signature valid for the signed text:  YES
   What you copied matches it:           YES, exactly (apart from the signature block)
-  Who holds the key:                    not established by a signature (see key-card.json)
-  Same self as before:                  not established by a signature
+Not established by any signature, on this post or any other: who holds the key (see key-card.json), and whether the one signing is the same self as before.
 ```
 
 If you copied from a rendered page and the Markdown is gone, the second line says *same words, not exact*. If the page has text the signature doesn't cover, it lists those lines.
@@ -80,8 +80,10 @@ one command and needs only `ssh-keygen`.
 
 - **Two keys.** A master key (Ed25519) certifies a working key for 90 days as
   an OpenSSH certificate. The master should live offline, ideally on a hardware
-  key, and does almost nothing else. If a working key is lost or stolen, renew,
-  and the master never certifies the stolen one again.
+  key, and does almost nothing else. If a working key is lost or stolen, renew:
+  the master never certifies the stolen one again, and the rotation goes into
+  the log. Renewing doesn't revoke the stolen key's certificate, though. It
+  stays valid until it expires (see "Rotation is in the log" below).
 - **Trust anchor.** `allowed_signers` names your master key as a
   `cert-authority`. Anything signed by a key it certified, in the `sello-post`
   namespace, verifies. Anything else doesn't.
@@ -102,6 +104,14 @@ one command and needs only `ssh-keygen`.
   the signature file is the one the log recorded. (Version 0.1.0 stored them by
   filename alone, which let a later post silently break an earlier seal. A
   reviewer on Reddit found it. Seals made by 0.1.0 still check.)
+- **Rotation is in the log** (0.1.5). `renew` appends a status record naming
+  the retired and the new working key, signed by the master key in its own
+  namespace (`sello-status`), so it can never pass as a post. It says it's
+  *self-attested*: there's no witness key yet (see
+  [docs/STATUS-RECORDS.md](docs/STATUS-RECORDS.md)). Renewing doesn't revoke
+  the old certificate, so a stolen working key still makes signatures that
+  `ssh-keygen` alone accepts until it expires. What the log adds: `check`
+  refuses a seal logged after the record that retired its key.
 - **Mistakes get annotated, not erased.** The log is append-only. If an entry was wrong (a void seal, a retraction), `sello note --about N "..."` appends a signed note that points back at it. Nothing in the log is ever edited, and a README is never where corrections live.
 - **Signatures outlive working keys.** `verify` checks the certificate at the
   signing time recorded in the log, so a post signed in March still verifies in
@@ -156,11 +166,15 @@ The tests cover:
 - a log whose times go backwards is refused;
 - a whole post copied from the page, signature block and all, checks; text added after signing is reported; a rendered copy is reported as *same words, not exact*; a seal naming another Sello ID is refused;
 - the handshake verifies, and a replay to another host fails;
-- the key card states its limits.
+- the key card states its limits;
+- `renew` logs a signed rotation record; it can't verify as a post, and a post's signature can't pass as one;
+- seals on both sides of a rotation check;
+- a seal signed with the old key after a rotation is refused, though its certificate hasn't expired;
+- a broken log doesn't stop a rotation, but sello says it wasn't logged.
 
 ## Status
 
-Version 0.1.3. Small, readable, not audited. See [CHANGELOG.md](CHANGELOG.md) for what reviewers have found. Issues and pull requests are welcome,
+Version 0.1.5. Small, readable, not audited. See [CHANGELOG.md](CHANGELOG.md) for what reviewers have found. Issues and pull requests are welcome,
 and so are stronger critiques.
 
 ## Who made this

@@ -232,5 +232,105 @@ class SelloTest(unittest.TestCase):
         self.assertEqual(sello._entries(self.pub / "log.jsonl")[-1]["bytes"], 13)
 
 
+class RotationTest(unittest.TestCase):
+    """Rotation in the log (0.1.5), promised in public to Royce in seal #38. A fresh kit per test."""
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(); root = Path(self.tmp.name)
+        self.prev_home = os.environ.get("SELLO_HOME")
+        os.environ["SELLO_HOME"] = str(root / "private")
+        self.home, self.pub = root / "private", root / "public"
+        sello.init("Test Agent", "test-agent", self.pub)
+        self.before = root / "before.md"; self.before.write_text("Signed before the rotation.\n")
+        self.before_line = sello.seal(self.before, self.pub)
+
+    def tearDown(self):
+        if self.prev_home is None: os.environ.pop("SELLO_HOME", None)
+        else: os.environ["SELLO_HOME"] = self.prev_home
+        self.tmp.cleanup()
+
+    def _log(self): return sello._entries(self.pub / "log.jsonl")
+
+    def test_renew_logs_a_signed_rotation(self):
+        old = sello._cert_file_info(self.home / "working_ed25519-cert.pub")
+        sello.renew(self.pub)
+        new = sello._cert_file_info(self.home / "working_ed25519-cert.pub")
+        e = self._log()[-1]
+        self.assertEqual((e["kind"], e["status"], e["attestation"]), ("status", "key-rotated", "self"))
+        self.assertEqual(e["old_key"], old); self.assertEqual(e["new_key"], new)
+        self.assertNotEqual(old["fingerprint"], new["fingerprint"])
+        self.assertTrue(sello.verify_log(self.pub / "log.jsonl", quiet=True)[0])
+        self.assertTrue(sello.verify_status(e, self.pub))
+
+    def test_fingerprint_matches_ssh_keygen(self):
+        out = subprocess.run(["ssh-keygen", "-lf", str(self.home / "working_ed25519.pub")],
+                             capture_output=True, check=True).stdout.decode().split()[1]
+        self.assertEqual(sello._cert_file_info(self.home / "working_ed25519-cert.pub")["fingerprint"], out)
+
+    def test_status_record_is_not_a_post(self):
+        sello.renew(self.pub)
+        e = self._log()[-1]; can, sig = sello.sig_paths(self.pub, e)
+        self.assertFalse(sello.verify(can, sig, self.pub / "allowed_signers", "test-agent", quiet=True))
+        line = f"Sello ID {sello.sello_id(self.pub)} · seal #{e['seq']} {e['entry_hash'][:12]}"
+        self.assertFalse(sello.check(can, line, self.pub, quiet=True))
+        self.assertIn("status record", " ".join(sello.examine(can, line, self.pub)["reasons"]))
+
+    def test_post_signature_cannot_pass_as_status(self):
+        post = dict(self._log()[0], kind="status")
+        self.assertFalse(sello.verify_status(post, self.pub))
+
+    def test_seals_on_both_sides_of_a_rotation_check(self):
+        sello.renew(self.pub)
+        after = self.before.with_name("after.md"); after.write_text("Signed after the rotation.\n")
+        line = sello.seal(after, self.pub)
+        self.assertTrue(sello.check(self.before, self.before_line, self.pub, quiet=True))
+        self.assertTrue(sello.check(after, line, self.pub, quiet=True))
+        _, sig = sello.sig_paths(self.pub, self._log()[-1])
+        self.assertEqual(sello._sig_key(sig)["fingerprint"], self._log()[-2]["new_key"]["fingerprint"])
+
+    def test_old_key_used_after_rotation_is_refused(self):
+        """A thief kept the old working key. Its certificate hasn't expired, so the signature is valid;
+        the rotation record is what makes `check` refuse it."""
+        thief = Path(self.tmp.name) / "thief"; thief.mkdir()
+        for f in ("working_ed25519", "working_ed25519.pub", "working_ed25519-cert.pub"):
+            (thief / f).write_bytes((self.home / f).read_bytes()); os.chmod(thief / f, 0o600)
+        sello.renew(self.pub)
+        os.environ["SELLO_HOME"] = str(thief)
+        try:
+            forged = self.before.with_name("forged.md"); forged.write_text("Words the agent never wrote.\n")
+            line = sello.seal(forged, self.pub)
+        finally:
+            os.environ["SELLO_HOME"] = str(self.home)
+        e = self._log()[-1]; can, sig = sello.sig_paths(self.pub, e)
+        self.assertTrue(sello.verify(can, sig, self.pub / "allowed_signers", "test-agent", quiet=True,
+                                     at=sello._stamp(e)))  # the cryptography alone accepts it
+        r = sello.examine(forged, line, self.pub)
+        self.assertFalse(r["sig"]); self.assertIn("retired at #", " ".join(r["reasons"]))
+        self.assertFalse(sello.check(forged, line, self.pub, quiet=True))
+        self.assertTrue(sello.check(self.before, self.before_line, self.pub, quiet=True))
+        self.assertFalse(sello.show_log(self.pub))
+
+    def test_honest_log_lists_clean(self):
+        sello.renew(self.pub)
+        sello.note("The rotation was routine.", len(self._log()), self.pub)
+        self.assertTrue(sello.show_log(self.pub))
+        self.assertEqual([sello._kind(e) for e in self._log()], ["seal", "status", "note"])
+
+    def test_broken_log_still_rotates_but_says_so(self):
+        log = self.pub / "log.jsonl"; original = log.read_text()
+        e = json.loads(original.splitlines()[0]); e["title"] = "tampered.md"; log.write_text(json.dumps(e) + "\n")
+        old = sello._cert_file_info(self.home / "working_ed25519-cert.pub")["fingerprint"]
+        with self.assertRaises(SystemExit):
+            sello.renew(self.pub)
+        self.assertNotEqual(sello._cert_file_info(self.home / "working_ed25519-cert.pub")["fingerprint"], old)
+        self.assertEqual(len(self._log()), 1)
+
+    def test_status_names_the_last_rotation(self):
+        import contextlib, io
+        sello.renew(self.pub)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf): sello.status(self.pub)
+        self.assertIn("last rotation logged: #2", buf.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()
